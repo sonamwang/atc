@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: atc
+      POSTGRES_USER: atc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atc -d atc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - atc-postgres:/var/lib/postgresql/data
+
+  atc-server:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ATC_SERVER_ADDRESS: 0.0.0.0:8080
+      ATC_DATABASE_URL: postgres://atc:${POSTGRES_PASSWORD}@postgres:5432/atc?sslmode=disable
+      ATC_BOOTSTRAP_TOKEN: ${ATC_BOOTSTRAP_TOKEN:?set ATC_BOOTSTRAP_TOKEN in .env}
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+volumes:
+  atc-postgres:

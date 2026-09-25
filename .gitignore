@@ -1,0 +1,9 @@
+.env
+.DS_Store
+bin/
+coverage.out
+*.pem
+*.key
+*.crt
+dev-ca/
+agent-token

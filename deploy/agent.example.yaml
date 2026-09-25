@@ -1,0 +1,27 @@
+# Trusted, agent-local renewal configuration. Do not infer these values from
+# certificate inventory or accept this file from the ATC server.
+certificate_paths:
+  - /etc/ssl
+  - /etc/nginx
+
+key_directory: /var/lib/atc/keys
+deployment_roots:
+  - /etc/nginx/certs
+
+renewal_targets:
+  - certificate_id: cert_replace_with_inventory_id
+    certificate_path: /etc/nginx/certs/api.example.internal.pem
+    # Required for the currently supported certificate-only renewal mode.
+    # This is an existing FileKeyStore key ID, never a key path or key value.
+    key_id: key_replace_with_existing_key_id
+    # Required when rotate_key is true; must be an existing Nginx key path.
+    key_deployment_path: /etc/nginx/certs/api.example.internal.key
+    key_algorithm: ECDSA_P256
+    common_name: api.example.internal
+    dns_names:
+      - api.example.internal
+    rotate_key: false
+    tls_address: 127.0.0.1:443
+    tls_server_name: api.example.internal
+    # Optional when the local OS trust store already trusts the issuer.
+    tls_ca_file: /etc/atc/dev-ca-root.pem
