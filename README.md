@@ -22,6 +22,9 @@ ATC manages certificate inventory and lifecycle operations around established st
 
 ## Run locally
 
+ATC requires Go 1.25 or later. Docker Desktop is required only for the
+PostgreSQL-backed Compose environment.
+
 ```sh
 cp .env.example .env
 # Set ATC_BOOTSTRAP_TOKEN and POSTGRES_PASSWORD in .env to distinct, long random values.
