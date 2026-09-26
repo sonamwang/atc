@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adaptive-trust/atc/internal/auth"
+	"github.com/adaptive-trust/atc/internal/ct"
 	"github.com/adaptive-trust/atc/internal/notify"
 	"github.com/adaptive-trust/atc/internal/policy"
 	"github.com/adaptive-trust/atc/internal/risk"
@@ -154,6 +156,64 @@ func TestOperatorTokenProtectsOperatorEndpoints(t *testing.T) {
 	h.ServeHTTP(authorized, authorizedRequest)
 	if authorized.Code != http.StatusOK {
 		t.Fatalf("authorized certificate list = %d: %s", authorized.Code, authorized.Body.String())
+	}
+}
+
+func TestRBACSeparatesViewerOperatorAndAdmin(t *testing.T) {
+	authorizer, err := auth.NewOperatorAuthorizer([]auth.Credential{
+		{Name: "viewer", Role: auth.RoleViewer, Token: "viewer-token-for-api"},
+		{Name: "operator", Role: auth.RoleOperator, Token: "operator-token-for-api"},
+		{Name: "admin", Role: auth.RoleAdmin, Token: "admin-token-for-api"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(storage.NewMemory(), "bootstrap", slog.Default()).WithOperatorAuthorizer(authorizer)
+	h := server.Handler()
+	viewerRead := httptest.NewRequest(http.MethodGet, "/api/v1/certificates", nil)
+	viewerRead.Header.Set("Authorization", "Bearer viewer-token-for-api")
+	viewerResult := httptest.NewRecorder()
+	h.ServeHTTP(viewerResult, viewerRead)
+	if viewerResult.Code != http.StatusOK {
+		t.Fatalf("viewer read = %d: %s", viewerResult.Code, viewerResult.Body.String())
+	}
+	viewerRenew := httptest.NewRequest(http.MethodPost, "/api/v1/certificates/cert_missing/renew", nil)
+	viewerRenew.Header.Set("Authorization", "Bearer viewer-token-for-api")
+	viewerRenew.Header.Set("X-ATC-Confirm", "renewal")
+	viewerRenew.Header.Set("Idempotency-Key", "rbac-viewer-001")
+	viewerRenewResult := httptest.NewRecorder()
+	h.ServeHTTP(viewerRenewResult, viewerRenew)
+	if viewerRenewResult.Code != http.StatusForbidden {
+		t.Fatalf("viewer renew = %d", viewerRenewResult.Code)
+	}
+	operatorRevoke := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agt_missing/revoke", nil)
+	operatorRevoke.Header.Set("Authorization", "Bearer operator-token-for-api")
+	operatorRevoke.Header.Set("X-ATC-Confirm", "revoke")
+	operatorRevokeResult := httptest.NewRecorder()
+	h.ServeHTTP(operatorRevokeResult, operatorRevoke)
+	if operatorRevokeResult.Code != http.StatusForbidden {
+		t.Fatalf("operator revoke = %d", operatorRevokeResult.Code)
+	}
+	whoami := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	whoami.Header.Set("Authorization", "Bearer admin-token-for-api")
+	whoamiResult := httptest.NewRecorder()
+	h.ServeHTTP(whoamiResult, whoami)
+	if whoamiResult.Code != http.StatusOK || !strings.Contains(whoamiResult.Body.String(), `"name":"admin"`) {
+		t.Fatalf("whoami = %d: %s", whoamiResult.Code, whoamiResult.Body.String())
+	}
+}
+
+func TestCTLookupIsOptIn(t *testing.T) {
+	h := New(storage.NewMemory(), "bootstrap", slog.Default()).Handler()
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/ct/api.example.test", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured CT lookup = %d: %s", response.Code, response.Body.String())
+	}
+	// The API package only owns access control and response behaviour. Detailed
+	// CT response parsing is covered in internal/ct tests.
+	if _, err := ct.NewMonitor("https://ct.example.test/?q={domain}&output=json"); err != nil {
+		t.Fatal(err)
 	}
 }
 

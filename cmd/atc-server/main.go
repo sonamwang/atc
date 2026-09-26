@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/adaptive-trust/atc/internal/api"
+	"github.com/adaptive-trust/atc/internal/auth"
+	"github.com/adaptive-trust/atc/internal/ct"
 	"github.com/adaptive-trust/atc/internal/issuer"
 	"github.com/adaptive-trust/atc/internal/notify"
 	"github.com/adaptive-trust/atc/internal/policy"
@@ -95,9 +97,23 @@ func main() {
 		apiServer.WithNotifier(alertWebhook)
 		log.Info("signed alert webhook enabled")
 	}
-	if operatorToken := os.Getenv("ATC_OPERATOR_TOKEN"); operatorToken != "" {
+	operatorCredentialsFile := os.Getenv("ATC_OPERATOR_CREDENTIALS_FILE")
+	operatorToken := os.Getenv("ATC_OPERATOR_TOKEN")
+	if operatorCredentialsFile != "" && operatorToken != "" {
+		log.Error("configure either ATC_OPERATOR_CREDENTIALS_FILE or legacy ATC_OPERATOR_TOKEN, not both")
+		os.Exit(1)
+	}
+	if operatorCredentialsFile != "" {
+		authorizer, err := auth.LoadOperatorAuthorizer(operatorCredentialsFile)
+		if err != nil {
+			log.Error("operator RBAC initialization failed", "error", err)
+			os.Exit(1)
+		}
+		apiServer.WithOperatorAuthorizer(authorizer)
+		log.Info("multi-user operator RBAC enabled")
+	} else if operatorToken != "" {
 		apiServer.WithOperatorToken(operatorToken)
-		log.Info("operator API authorization enabled")
+		log.Warn("legacy single operator token enabled; configure ATC_OPERATOR_CREDENTIALS_FILE for RBAC")
 	} else {
 		log.Warn("operator API authorization is disabled; local development only")
 	}
@@ -109,6 +125,15 @@ func main() {
 		}
 		apiServer.WithVulnerabilityRules(rules)
 		log.Info("vulnerability rules enabled", "count", len(rules))
+	}
+	if endpoint := os.Getenv("ATC_CT_MONITOR_URL"); endpoint != "" {
+		monitor, err := ct.NewMonitor(endpoint)
+		if err != nil {
+			log.Error("CT monitor initialization failed", "error", err)
+			os.Exit(1)
+		}
+		apiServer.WithCTMonitor(monitor)
+		log.Info("Certificate Transparency monitor enabled")
 	}
 	devCADir := os.Getenv("ATC_DEV_CA_DIR")
 	issuerURL := os.Getenv("ATC_ISSUER_URL")

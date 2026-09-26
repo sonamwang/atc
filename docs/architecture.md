@@ -4,7 +4,7 @@ The first slice has three trust boundaries: agent enrollment, authenticated inve
 
 The server receives a bootstrap credential only on registration and returns a random agent token. It stores only the SHA-256 hash of that token in PostgreSQL. Inventory requests are scoped to the authenticated agent, so a caller cannot nominate a different agent or asset owner. Ordered migrations are recorded in `schema_migrations` and run in transactions at startup.
 
-The API uses JSON over HTTP for local development. Before deployment beyond local development, replace bearer-token transport with mutually authenticated TLS, use an external secret manager for bootstrap credentials, add operator authentication/RBAC, and complete independent security review.
+The API uses JSON over HTTP for local development. Before deployment beyond local development, enable mutually authenticated TLS, use an external secret manager for bootstrap credentials, configure named operator RBAC, and complete independent security review.
 
 ## Renewal lifecycle foundation
 
@@ -16,7 +16,7 @@ The worker is now implemented as an agent-local component. It creates a CSR with
 
 The worker also restores the previous certificate if it cannot record either the validating or final active lifecycle state after activation. It records the final active state before deleting backup material, so cleanup failures do not cause a known-good live certificate to be rolled back.
 
-Explicit deployment-target configuration and ACME challenge orchestration remain unfinished. The server can delegate issuance to a configured HTTPS CSR issuer with its own trust bundle and client certificate, while the worker verifies that the issued certificate public key matches the locally generated CSR, is valid for TLS server use, and has a linked full certificate chain before staging. The local `DevelopmentCA` is exclusively for local development and integration testing.
+Deployment targets are explicit in trusted agent configuration. File targets support Nginx and Apache service providers; Kubernetes targets use a locally authenticated `kubectl` transaction against a named Secret and Deployment. File keys use the built-in local key store; TPM/HSM keys use an agent-local signer plugin that returns only public CSRs and signatures. The server can delegate issuance to a configured HTTPS CSR issuer with its own trust bundle and client certificate, while a local agent can use ACME HTTP-01 when a configured webroot is publicly served. The worker verifies that the issued certificate public key matches the locally generated CSR, is valid for TLS server use, and has a linked full certificate chain before staging. The local `DevelopmentCA` is exclusively for local development and integration testing.
 
 ## Renewal dispatch protocol
 

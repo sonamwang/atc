@@ -119,7 +119,7 @@ func (p *Postgres) Authenticate(ctx context.Context, raw string) (Agent, bool, e
 	}
 	return a, true, nil
 }
-func (p *Postgres) RevokeAgent(ctx context.Context, agentID string) error {
+func (p *Postgres) RevokeAgent(ctx context.Context, agentID string, actor ...string) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -130,7 +130,7 @@ func (p *Postgres) RevokeAgent(ctx context.Context, agentID string) error {
 		return fmt.Errorf("revoke agent: %w", err)
 	}
 	if cmd.RowsAffected() == 1 {
-		if err := insertAudit(ctx, tx, event("agent_revoked", "operator", "", "", "HIGH", "Agent credential revoked")); err != nil {
+		if err := insertAudit(ctx, tx, event("agent_revoked", auditActor(actor), "", "", "HIGH", "Agent credential revoked")); err != nil {
 			return err
 		}
 	} else {
@@ -292,7 +292,7 @@ func (p *Postgres) Audit(ctx context.Context) ([]AuditEvent, error) {
 	return out, rows.Err()
 }
 
-func (p *Postgres) RequestRenewal(ctx context.Context, certificateID, idempotencyKey string, rotateKey bool) (RenewalJob, error) {
+func (p *Postgres) RequestRenewal(ctx context.Context, certificateID, idempotencyKey string, rotateKey bool, actor ...string) (RenewalJob, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return RenewalJob{}, err
@@ -316,7 +316,7 @@ func (p *Postgres) RequestRenewal(ctx context.Context, certificateID, idempotenc
 	if job.CertificateID != certificateID || job.RotateKey != rotateKey {
 		return RenewalJob{}, errors.New("idempotency key was used for another request")
 	}
-	if err = insertAudit(ctx, tx, event("certificate_renewal_requested", "operator", "", certificateID, "INFO", "Certificate renewal requested")); err != nil {
+	if err = insertAudit(ctx, tx, event("certificate_renewal_requested", auditActor(actor), "", certificateID, "INFO", "Certificate renewal requested")); err != nil {
 		return RenewalJob{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

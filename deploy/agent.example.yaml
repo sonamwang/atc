@@ -5,6 +5,12 @@ certificate_paths:
   - /etc/nginx
 
 key_directory: /var/lib/atc/keys
+# The default file store is appropriate for locally managed key files. A TPM
+# or HSM can use a locally installed signer plugin which retains key handles
+# and returns CSRs only; private-key export and file/Secret key rotation stay
+# disabled in that mode.
+key_store: file
+# hardware_signer_plugin: /usr/local/libexec/atc-hardware-signer
 deployment_roots:
   - /etc/nginx/certs
 
@@ -23,5 +29,31 @@ renewal_targets:
     rotate_key: false
     tls_address: 127.0.0.1:443
     tls_server_name: api.example.internal
+    # nginx (default) or apache. The agent uses fixed validation/reload commands.
+    service: nginx
+    # control_plane (default) obtains a certificate through ATC's configured
+    # issuer. acme_http01 runs an ACME HTTP-01 order locally on this host.
+    issuer: control_plane
+    # To use ACME HTTP-01, replace issuer above and uncomment/configure this
+    # block. The web server must publish WEBROOT/.well-known/acme-challenge on
+    # public port 80 for every DNS name, and TOS acceptance is explicit.
+    # acme:
+    #   directory_url: https://acme-v02.api.letsencrypt.org/directory
+    #   email: security@example.internal
+    #   account_key_file: /var/lib/atc/acme/account.pem
+    #   webroot: /var/www/html
+    #   terms_of_service_accepted: true
+    # For a Kubernetes workload, the agent can transactionally update a Secret
+    # using its local kubectl/service-account identity and then wait for a
+    # bounded Deployment rollout. This is a trusted local target, not an API
+    # instruction. Do not use certificate_path/key_deployment_path in this mode.
+    # deployment: kubernetes_secret
+    # service: kubernetes
+    # kubernetes:
+    #   namespace: security
+    #   secret_name: api-tls
+    #   certificate_key: tls.crt
+    #   private_key: tls.key
+    #   deployment: api
     # Optional when the local OS trust store already trusts the issuer.
     tls_ca_file: /etc/atc/dev-ca-root.pem

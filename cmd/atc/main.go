@@ -40,6 +40,10 @@ func main() {
 		run(client, *server, "GET", "/api/v1/health", "", nil)
 		return
 	}
+	if len(args) == 1 && args[0] == "whoami" {
+		run(client, *server, "GET", "/api/v1/whoami", *token, nil)
+		return
+	}
 	if len(args) == 2 && args[0] == "agent" && args[1] == "status" {
 		run(client, *server, "GET", "/api/v1/agents", *token, nil)
 		return
@@ -67,6 +71,10 @@ func main() {
 		run(client, *server, "GET", "/api/v1/findings", *token, nil)
 		return
 	}
+	if len(args) == 3 && args[0] == "ct" && args[1] == "lookup" {
+		run(client, *server, "GET", "/api/v1/ct/"+args[2], *token, nil)
+		return
+	}
 	if len(args) == 3 && args[0] == "certificates" && (args[1] == "renew" || args[1] == "rotate") {
 		if *token == "" {
 			die("--token or ATC_OPERATOR_TOKEN is required")
@@ -78,7 +86,7 @@ func main() {
 		run(client, *server, "POST", path, *token, nil)
 		return
 	}
-	fmt.Fprintln(os.Stderr, "usage: atc [-server URL] [-token TOKEN] <version|health|agent status|agent revoke ID|certificates list|certificates inspect ID|certificates renew ID|certificates rotate ID|renewals list|findings list>")
+	fmt.Fprintln(os.Stderr, "usage: atc [-server URL] [-token TOKEN] <version|health|whoami|agent status|agent revoke ID|certificates list|certificates inspect ID|certificates renew ID|certificates rotate ID|renewals list|findings list|ct lookup DOMAIN>")
 	os.Exit(2)
 }
 func env(key, fallback string) string {

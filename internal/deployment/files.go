@@ -18,6 +18,21 @@ type StagedFile struct {
 type StagedPair struct{ certificate, key *StagedFile }
 type FileDeployer struct{ roots []string }
 
+// Staged is a reversible local deployment transaction. Implementations keep
+// certificate and private-key bytes on the managed host.
+type Staged interface {
+	Activate() error
+	Rollback() error
+	Commit() error
+	Discard() error
+}
+
+// Deployer supports trusted agent-local deployment targets.
+type Deployer interface {
+	Stage(string, []byte) (Staged, error)
+	StagePair(string, string, []byte, []byte) (Staged, error)
+}
+
 func NewFileDeployer(roots []string) (*FileDeployer, error) {
 	if len(roots) == 0 {
 		return nil, errors.New("at least one allowed certificate root is required")
@@ -32,7 +47,10 @@ func NewFileDeployer(roots []string) (*FileDeployer, error) {
 	}
 	return &FileDeployer{roots: out}, nil
 }
-func (d *FileDeployer) Stage(target string, contents []byte) (*StagedFile, error) {
+func (d *FileDeployer) Stage(target string, contents []byte) (Staged, error) {
+	return d.stage(target, contents)
+}
+func (d *FileDeployer) stage(target string, contents []byte) (*StagedFile, error) {
 	path, err := d.allowed(target)
 	if err != nil {
 		return nil, err
@@ -68,12 +86,12 @@ func (d *FileDeployer) Stage(target string, contents []byte) (*StagedFile, error
 	}
 	return &StagedFile{target: path, staged: stage, backup: path + ".atc-backup-" + nonce, mode: info.Mode().Perm()}, nil
 }
-func (d *FileDeployer) StagePair(certificatePath, keyPath string, certificatePEM, keyPEM []byte) (*StagedPair, error) {
-	certificate, err := d.Stage(certificatePath, certificatePEM)
+func (d *FileDeployer) StagePair(certificatePath, keyPath string, certificatePEM, keyPEM []byte) (Staged, error) {
+	certificate, err := d.stage(certificatePath, certificatePEM)
 	if err != nil {
 		return nil, err
 	}
-	key, err := d.Stage(keyPath, keyPEM)
+	key, err := d.stage(keyPath, keyPEM)
 	if err != nil {
 		_ = certificate.Discard()
 		return nil, err

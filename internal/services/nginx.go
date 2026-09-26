@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 )
 
 type Status string
@@ -68,4 +69,17 @@ func stringTrim(b []byte) string {
 		b = b[:len(b)-1]
 	}
 	return string(b)
+}
+
+// NewProvider only accepts service identifiers from trusted local agent
+// configuration. Callers cannot supply command paths or arbitrary arguments.
+func NewProvider(service string) (Provider, error) {
+	switch strings.ToLower(strings.TrimSpace(service)) {
+	case "", "nginx":
+		return NewNginxProvider(), nil
+	case "apache", "apache2":
+		return NewApacheProvider(), nil
+	default:
+		return nil, errors.New("unsupported web service")
+	}
 }

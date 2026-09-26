@@ -19,6 +19,7 @@ import (
 	"github.com/adaptive-trust/atc/internal/agent"
 	"github.com/adaptive-trust/atc/internal/config"
 	"github.com/adaptive-trust/atc/internal/deployment"
+	"github.com/adaptive-trust/atc/internal/issuer"
 	"github.com/adaptive-trust/atc/internal/keys"
 	"github.com/adaptive-trust/atc/internal/openssl"
 	"github.com/adaptive-trust/atc/internal/renewal"
@@ -201,11 +202,26 @@ func executeRenewalCommand(ctx context.Context, client *http.Client, server, tok
 	if !rotateKey && target.KeyID == "" {
 		return fmt.Errorf("renewal target requires key_id when rotation is disabled")
 	}
-	keyStore, err := keys.NewFileKeyStore(trusted.KeyDirectory)
+	var keyStore keys.KeyStore
+	if trusted.KeyStore == "hardware_plugin" {
+		keyStore, err = keys.NewHardwareKeyStore(trusted.HardwareSignerPlugin)
+	} else {
+		keyStore, err = keys.NewFileKeyStore(trusted.KeyDirectory)
+	}
 	if err != nil {
 		return err
 	}
-	deployer, err := deployment.NewFileDeployer(trusted.DeploymentRoots)
+	var deployer renewal.Stager
+	if target.Deployment == "kubernetes_secret" {
+		deployer, err = deployment.NewKubernetesSecretDeployer(deployment.KubernetesSecretConfig{
+			Namespace:      target.Kubernetes.Namespace,
+			Name:           target.Kubernetes.SecretName,
+			CertificateKey: target.Kubernetes.CertificateKey,
+			PrivateKey:     target.Kubernetes.PrivateKey,
+		})
+	} else {
+		deployer, err = deployment.NewFileDeployer(trusted.DeploymentRoots)
+	}
 	if err != nil {
 		return err
 	}
@@ -214,7 +230,30 @@ func executeRenewalCommand(ctx context.Context, client *http.Client, server, tok
 		return err
 	}
 	remote := &agent.RenewalClient{ServerURL: server, Token: token, JobID: command.Job.ID, HTTPClient: client}
-	worker := renewal.NewWorker(keyStore, remote, deployer, services.NewNginxProvider()).WithTLSValidator(tlsValidator)
+	var certificateIssuer issuer.CertificateIssuer = remote
+	if target.Issuer == "acme_http01" {
+		acmeIssuer, err := issuer.NewACMEHTTP01Issuer(issuer.ACMEHTTP01Config{
+			DirectoryURL:           target.ACME.DirectoryURL,
+			Email:                  target.ACME.Email,
+			AccountKeyFile:         target.ACME.AccountKeyFile,
+			Webroot:                target.ACME.Webroot,
+			TermsOfServiceAccepted: target.ACME.TermsOfServiceAccepted,
+		})
+		if err != nil {
+			return err
+		}
+		certificateIssuer = acmeIssuer
+	}
+	var service services.Provider
+	if target.Service == "kubernetes" {
+		service, err = services.NewKubernetesProvider(target.Kubernetes.Namespace, target.Kubernetes.Deployment)
+	} else {
+		service, err = services.NewProvider(target.Service)
+	}
+	if err != nil {
+		return err
+	}
+	worker := renewal.NewWorker(keyStore, certificateIssuer, deployer, service).WithTLSValidator(tlsValidator)
 	job := renewal.Job{KeyID: target.KeyID, CertificatePath: target.CertificatePath, KeyDeploymentPath: target.KeyDeploymentPath, KeyAlgorithm: target.KeyAlgorithm, RotateKey: rotateKey, Subject: pkix.Name{CommonName: target.CommonName}, DNSNames: target.DNSNames, Lifetime: 24 * time.Hour}
 	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

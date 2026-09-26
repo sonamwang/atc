@@ -7,4 +7,4 @@
 | Cross-agent inventory write | The server resolves agent identity from the bearer token and derives asset ownership server-side. | The in-memory store is single-process only. |
 | Command injection | OpenSSL is invoked with fixed executable and arguments; no shell is used. | Local PATH resolution remains a deployment concern. |
 | Malicious or oversized certificate input | File scan does not follow symlinks and rejects files over 10 MiB; JSON body is capped at 2 MiB. | Parser fuzzing and content-type policy remain future work. |
-| Server or database compromise | Tokens are retained as hashes and audit records have no normal mutation API. | Encryption at rest, RBAC, and immutable/WORM audit storage are future work. |
+| Server or database compromise | Agent and named-operator tokens are retained as hashes; audit records have no normal mutation API. | Encryption at rest and immutable/WORM audit storage remain deployment work. |

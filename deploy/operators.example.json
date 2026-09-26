@@ -1,0 +1,17 @@
+[
+  {
+    "name": "security-viewer",
+    "role": "viewer",
+    "token": "replace-with-a-unique-long-random-viewer-token"
+  },
+  {
+    "name": "certificate-operator",
+    "role": "operator",
+    "token": "replace-with-a-unique-long-random-operator-token"
+  },
+  {
+    "name": "security-admin",
+    "role": "admin",
+    "token": "replace-with-a-unique-long-random-admin-token"
+  }
+]

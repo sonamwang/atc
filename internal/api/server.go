@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adaptive-trust/atc/internal/auth"
 	"github.com/adaptive-trust/atc/internal/certificates"
+	"github.com/adaptive-trust/atc/internal/ct"
 	"github.com/adaptive-trust/atc/internal/issuer"
 	"github.com/adaptive-trust/atc/internal/notify"
 	"github.com/adaptive-trust/atc/internal/policy"
@@ -23,21 +25,36 @@ import (
 type Server struct {
 	store     storage.Repository
 	bootstrap string
-	operator  string
+	operators *auth.OperatorAuthorizer
 	log       *slog.Logger
 	policy    policy.Policy
 	issuer    issuer.CertificateIssuer
 	notifier  notify.Notifier
 	now       func() time.Time
 	rules     []risk.VulnerabilityRule
+	ctMonitor *ct.Monitor
 }
 
 func New(store storage.Repository, bootstrap string, log *slog.Logger) *Server {
 	return &Server{store: store, bootstrap: bootstrap, log: log, policy: policy.Default(), now: time.Now}
 }
 func (s *Server) WithIssuer(value issuer.CertificateIssuer) *Server { s.issuer = value; return s }
-func (s *Server) WithOperatorToken(value string) *Server            { s.operator = value; return s }
-func (s *Server) WithNotifier(value notify.Notifier) *Server        { s.notifier = value; return s }
+func (s *Server) WithOperatorToken(value string) *Server {
+	if value == "" {
+		s.operators = nil
+		return s
+	}
+	authorizer, err := auth.NewOperatorAuthorizer([]auth.Credential{{Name: "operator", Role: auth.RoleAdmin, Token: value}})
+	if err == nil {
+		s.operators = authorizer
+	}
+	return s
+}
+func (s *Server) WithOperatorAuthorizer(value *auth.OperatorAuthorizer) *Server {
+	s.operators = value
+	return s
+}
+func (s *Server) WithNotifier(value notify.Notifier) *Server { s.notifier = value; return s }
 func (s *Server) WithPolicy(value policy.Policy) *Server {
 	if err := value.Validate(); err == nil {
 		s.policy = value
@@ -48,10 +65,12 @@ func (s *Server) WithVulnerabilityRules(value []risk.VulnerabilityRule) *Server 
 	s.rules = append([]risk.VulnerabilityRule(nil), value...)
 	return s
 }
+func (s *Server) WithCTMonitor(value *ct.Monitor) *Server { s.ctMonitor = value; return s }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.dashboard)
 	mux.HandleFunc("GET /api/v1/health", s.health)
+	mux.HandleFunc("GET /api/v1/whoami", s.whoami)
 	mux.HandleFunc("POST /api/v1/agents/register", s.register)
 	mux.HandleFunc("GET /api/v1/agents", s.agents)
 	mux.HandleFunc("GET /api/v1/agents/{id}", s.agentDetail)
@@ -61,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/certificates", s.certificates)
 	mux.HandleFunc("GET /api/v1/certificates/{id}", s.certificate)
 	mux.HandleFunc("GET /api/v1/findings", s.findings)
+	mux.HandleFunc("GET /api/v1/ct/{domain}", s.ctLookup)
 	mux.HandleFunc("POST /api/v1/certificates/{id}/renew", s.requestRenewal(false))
 	mux.HandleFunc("POST /api/v1/certificates/{id}/rotate", s.requestRenewal(true))
 	mux.HandleFunc("GET /api/v1/renewals", s.renewals)
@@ -86,6 +106,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok", "version": "0.1.0"})
+}
+
+func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.require(w, r, auth.View)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, principal)
 }
 
 type registration struct {
@@ -190,15 +218,15 @@ type agentView struct {
 }
 
 func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
-	authorized := s.bootstrapAuthorized(r)
-	if s.operator != "" {
-		authorized = s.operatorAuthorized(r)
+	principal, authorized := s.require(w, r, auth.Revoke)
+	if !authorized {
+		return
 	}
-	if !authorized || r.Header.Get("X-ATC-Confirm") != "revoke" {
+	if r.Header.Get("X-ATC-Confirm") != "revoke" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator authorization and X-ATC-Confirm: revoke are required"})
 		return
 	}
-	if err := s.store.RevokeAgent(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.store.RevokeAgent(r.Context(), r.PathValue("id"), principal.Name); err != nil {
 		if err.Error() == "unknown agent" {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 			return
@@ -304,6 +332,23 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, results)
+}
+func (s *Server) ctLookup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	if s.ctMonitor == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "CT monitoring is not configured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	entries, err := s.ctMonitor.Lookup(ctx, r.PathValue("domain"))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CT lookup failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperator(w, r) {
@@ -507,11 +552,11 @@ func (s *Server) notify(event notify.Event) {
 }
 func (s *Server) requestRenewal(rotateKey bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		authorized := s.bootstrapAuthorized(r)
-		if s.operator != "" {
-			authorized = s.operatorAuthorized(r)
+		principal, authorized := s.require(w, r, auth.Renew)
+		if !authorized {
+			return
 		}
-		if !authorized || r.Header.Get("X-ATC-Confirm") != "renewal" {
+		if r.Header.Get("X-ATC-Confirm") != "renewal" {
 			writeJSON(w, 401, map[string]string{"error": "operator authorization and X-ATC-Confirm: renewal are required"})
 			return
 		}
@@ -520,7 +565,7 @@ func (s *Server) requestRenewal(rotateKey bool) http.HandlerFunc {
 			writeJSON(w, 400, map[string]string{"error": "a 1-128 character Idempotency-Key using letters, digits, dot, underscore, or hyphen is required"})
 			return
 		}
-		job, err := s.store.RequestRenewal(r.Context(), r.PathValue("id"), key, rotateKey)
+		job, err := s.store.RequestRenewal(r.Context(), r.PathValue("id"), key, rotateKey, principal.Name)
 		if err != nil {
 			status := http.StatusBadRequest
 			if err.Error() == "active renewal job already exists" {
@@ -532,15 +577,28 @@ func (s *Server) requestRenewal(rotateKey bool) http.HandlerFunc {
 		writeJSON(w, http.StatusAccepted, job)
 	}
 }
-func (s *Server) operatorAuthorized(r *http.Request) bool {
-	return s.operator != "" && subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.operator)) == 1
-}
 func (s *Server) requireOperator(w http.ResponseWriter, r *http.Request) bool {
-	if s.operator == "" || s.operatorAuthorized(r) {
-		return true
+	_, ok := s.require(w, r, auth.View)
+	return ok
+}
+func (s *Server) require(w http.ResponseWriter, r *http.Request, permission auth.Permission) (auth.Principal, bool) {
+	if s.operators == nil {
+		// Local-memory development keeps the old frictionless workflow. A
+		// production process must configure an operator credential source.
+		return auth.Principal{Name: "operator", Role: auth.RoleAdmin}, true
 	}
-	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "operator authorization required"})
-	return false
+	principal, ok := s.operators.Authorize(bearer(r), permission)
+	if !ok {
+		status := http.StatusForbidden
+		message := "operator permission denied"
+		if bearer(r) == "" {
+			status = http.StatusUnauthorized
+			message = "operator authorization required"
+		}
+		writeJSON(w, status, map[string]string{"error": message})
+		return auth.Principal{}, false
+	}
+	return principal, true
 }
 func validIdempotencyKey(value string) bool {
 	if len(value) == 0 || len(value) > 128 {
@@ -555,5 +613,5 @@ func validIdempotencyKey(value string) bool {
 }
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<!doctype html><title>ATC Security Dashboard</title><style>body{font:16px system-ui;margin:2rem;color:#172033}table{border-collapse:collapse;width:100%;margin-top:1rem}th,td{padding:.6rem;border:1px solid #d9d9d9;text-align:left}th{background:#172033;color:white}.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{padding:1rem;background:#f3f6fa;border-radius:.5rem}form{margin:1rem 0}input{padding:.4rem;margin-left:.5rem}#error{color:#a40000}</style><h1>ATC Security Dashboard</h1><form id=auth><label>Operator token <input id=token type=password autocomplete=off></label><button>Load</button></form><p id=error></p><div class=cards><div class=card id=assets>Assets: 0</div><div class=card id=certs>Certificates: 0</div><div class=card id=risks>High risk: 0</div><div class=card id=stale>Stale inventories: 0</div><div class=card id=vulns>OpenSSL findings: 0</div></div><table><thead><tr><th>Subject</th><th>Issuer</th><th>Expires</th><th>Risk</th><th>Status</th></tr></thead><tbody id=rows></tbody></table><script>const form=document.getElementById('auth'),token=document.getElementById('token'),error=document.getElementById('error');token.value=sessionStorage.getItem('atcOperatorToken')||'';form.addEventListener('submit',e=>{e.preventDefault();load()});function api(path){const headers=token.value?{Authorization:'Bearer '+token.value}:{};return fetch(path,{headers}).then(r=>{if(!r.ok)throw Error(r.status===401?'Operator token required or invalid':'Request failed');return r.json()})}function load(){error.textContent='';sessionStorage.setItem('atcOperatorToken',token.value);Promise.all([api('/api/v1/certificates'),api('/api/v1/agents'),api('/api/v1/findings')]).then(([c,a,f])=>{assets.textContent='Assets: '+new Set(c.map(x=>x.AssetID)).size;certs.textContent='Certificates: '+c.length;risks.textContent='High risk: '+c.filter(x=>x.Policy.Risk==='HIGH'||x.Policy.Risk==='CRITICAL').length;stale.textContent='Stale inventories: '+a.filter(x=>x.inventory_status==='STALE'||x.inventory_status==='UNKNOWN').length;vulns.textContent='OpenSSL findings: '+f.length;rows.innerHTML=c.map(x=>'<tr><td>'+esc(x.Record.Subject)+'</td><td>'+esc(x.Record.Issuer)+'</td><td>'+new Date(x.Record.NotAfter).toLocaleString()+'</td><td>'+esc(x.Policy.Risk)+'</td><td>'+esc(x.Policy.Status)+'</td></tr>').join('')}).catch(e=>error.textContent=e.message)}load();function esc(s){const e=document.createElement('span');e.textContent=s;return e.innerHTML}</script>`))
+	_, _ = w.Write([]byte(`<!doctype html><title>ATC Security Dashboard</title><style>body{font:16px system-ui;margin:2rem;color:#172033}table{border-collapse:collapse;width:100%;margin-top:1rem}th,td{padding:.6rem;border:1px solid #d9d9d9;text-align:left}th{background:#172033;color:white}.cards{display:flex;gap:1rem;flex-wrap:wrap}.card{padding:1rem;background:#f3f6fa;border-radius:.5rem}form{margin:1rem 0}input{padding:.4rem;margin-left:.5rem}#error{color:#a40000}</style><h1>ATC Security Dashboard</h1><form id=auth><label>Access token <input id=token type=password autocomplete=off></label><button>Load</button></form><p id=error></p><div class=cards><div class=card id=assets>Assets: 0</div><div class=card id=certs>Certificates: 0</div><div class=card id=risks>High risk: 0</div><div class=card id=stale>Stale inventories: 0</div><div class=card id=vulns>OpenSSL findings: 0</div></div><table><thead><tr><th>Subject</th><th>Issuer</th><th>Expires</th><th>Risk</th><th>Status</th></tr></thead><tbody id=rows></tbody></table><script>const form=document.getElementById('auth'),token=document.getElementById('token'),error=document.getElementById('error');token.value=sessionStorage.getItem('atcOperatorToken')||'';form.addEventListener('submit',e=>{e.preventDefault();load()});function api(path){const headers=token.value?{Authorization:'Bearer '+token.value}:{};return fetch(path,{headers}).then(r=>{if(!r.ok)throw Error(r.status===401?'Access token required or invalid':'Request failed');return r.json()})}function load(){error.textContent='';sessionStorage.setItem('atcOperatorToken',token.value);Promise.all([api('/api/v1/certificates'),api('/api/v1/agents'),api('/api/v1/findings')]).then(([c,a,f])=>{assets.textContent='Assets: '+new Set(c.map(x=>x.AssetID)).size;certs.textContent='Certificates: '+c.length;risks.textContent='High risk: '+c.filter(x=>x.Policy.Risk==='HIGH'||x.Policy.Risk==='CRITICAL').length;stale.textContent='Stale inventories: '+a.filter(x=>x.inventory_status==='STALE'||x.inventory_status==='UNKNOWN').length;vulns.textContent='OpenSSL findings: '+f.length;rows.innerHTML=c.map(x=>'<tr><td>'+esc(x.Record.Subject)+'</td><td>'+esc(x.Record.Issuer)+'</td><td>'+new Date(x.Record.NotAfter).toLocaleString()+'</td><td>'+esc(x.Policy.Risk)+'</td><td>'+esc(x.Policy.Status)+'</td></tr>').join('')}).catch(e=>error.textContent=e.message)}load();function esc(s){const e=document.createElement('span');e.textContent=s;return e.innerHTML}</script>`))
 }

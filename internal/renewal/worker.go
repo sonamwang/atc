@@ -17,16 +17,7 @@ import (
 )
 
 type KeyManager interface{ keys.KeyStore }
-type Stager interface {
-	Stage(string, []byte) (*deployment.StagedFile, error)
-	StagePair(string, string, []byte, []byte) (*deployment.StagedPair, error)
-}
-type stagedDeployment interface {
-	Activate() error
-	Rollback() error
-	Commit() error
-	Discard() error
-}
+type Stager = deployment.Deployer
 type TransitionRecorder interface {
 	Record(context.Context, State) error
 }
@@ -53,8 +44,8 @@ func NewWorker(keys KeyManager, issuer issuer.CertificateIssuer, deployer Stager
 }
 
 // Execute changes a live certificate only after the replacement is parsed,
-// staged, and Nginx validates its resulting configuration. A failed service
-// validation triggers a rollback before the method returns an error.
+// staged, and the configured local service validates its resulting
+// configuration. A failed service validation triggers rollback before return.
 func (w *Worker) Execute(ctx context.Context, job Job, recorder TransitionRecorder) error {
 	state := RenewalPending
 	move := func(next State) error {
@@ -113,7 +104,7 @@ func (w *Worker) Execute(ctx context.Context, job Job, recorder TransitionRecord
 	if err := move(Issued); err != nil {
 		return err
 	}
-	var staged stagedDeployment
+	var staged deployment.Staged
 	if job.RotateKey {
 		if job.KeyDeploymentPath == "" {
 			fail(DeploymentFailed)
@@ -168,7 +159,7 @@ func (w *Worker) Execute(ctx context.Context, job Job, recorder TransitionRecord
 	}
 	return nil
 }
-func (w *Worker) rollback(staged stagedDeployment, recorder TransitionRecorder, current State, cause error) error {
+func (w *Worker) rollback(staged deployment.Staged, recorder TransitionRecorder, current State, cause error) error {
 	failure := ValidationFailed
 	if current == Staged {
 		failure = DeploymentFailed

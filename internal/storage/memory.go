@@ -57,14 +57,14 @@ type RenewalCommand struct {
 type Repository interface {
 	Register(context.Context, string, string, string) (Agent, string, error)
 	Authenticate(context.Context, string) (Agent, bool, error)
-	RevokeAgent(context.Context, string) error
+	RevokeAgent(context.Context, string, ...string) error
 	Ingest(context.Context, string, string, string, string, []certificates.Record, []string, policy.Policy) (Asset, []Certificate, error)
 	Agents(context.Context) ([]Agent, error)
 	Assets(context.Context) ([]Asset, error)
 	Certificates(context.Context) ([]Certificate, error)
 	Certificate(context.Context, string) (Certificate, bool, error)
 	Audit(context.Context) ([]AuditEvent, error)
-	RequestRenewal(context.Context, string, string, bool) (RenewalJob, error)
+	RequestRenewal(context.Context, string, string, bool, ...string) (RenewalJob, error)
 	Renewals(context.Context) ([]RenewalJob, error)
 	PendingRenewals(context.Context, string) ([]RenewalCommand, error)
 	AdvanceRenewal(context.Context, string, string, renewal.State, renewal.State) error
@@ -131,7 +131,7 @@ func (s *Memory) Authenticate(_ context.Context, raw string) (Agent, bool, error
 	a, exists := s.agents[id]
 	return a, ok && exists && a.Status == "ACTIVE", nil
 }
-func (s *Memory) RevokeAgent(_ context.Context, agentID string) error {
+func (s *Memory) RevokeAgent(_ context.Context, agentID string, actor ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	agent, ok := s.agents[agentID]
@@ -143,7 +143,7 @@ func (s *Memory) RevokeAgent(_ context.Context, agentID string) error {
 	}
 	agent.Status = "REVOKED"
 	s.agents[agentID] = agent
-	s.audit = append(s.audit, event("agent_revoked", "operator", "", "", "HIGH", "Agent credential revoked"))
+	s.audit = append(s.audit, event("agent_revoked", auditActor(actor), "", "", "HIGH", "Agent credential revoked"))
 	return nil
 }
 func (s *Memory) Ingest(_ context.Context, agentID, hostname, os, opensslVersion string, records []certificates.Record, renewableCertificateIDs []string, p policy.Policy) (Asset, []Certificate, error) {
@@ -242,7 +242,7 @@ func (s *Memory) Audit(_ context.Context) ([]AuditEvent, error) {
 	return out, nil
 }
 
-func (s *Memory) RequestRenewal(_ context.Context, certificateID, idempotencyKey string, rotateKey bool) (RenewalJob, error) {
+func (s *Memory) RequestRenewal(_ context.Context, certificateID, idempotencyKey string, rotateKey bool, actor ...string) (RenewalJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.certs[certificateID]; !ok {
@@ -263,8 +263,15 @@ func (s *Memory) RequestRenewal(_ context.Context, certificateID, idempotencyKey
 	}
 	job := RenewalJob{ID: id("renewal"), CertificateID: certificateID, IdempotencyKey: idempotencyKey, Status: "RENEWAL_PENDING", RotateKey: rotateKey, RequestedAt: time.Now().UTC()}
 	s.jobs[job.ID] = job
-	s.audit = append(s.audit, event("certificate_renewal_requested", "operator", "", certificateID, "INFO", "Certificate renewal requested"))
+	s.audit = append(s.audit, event("certificate_renewal_requested", auditActor(actor), "", certificateID, "INFO", "Certificate renewal requested"))
 	return job, nil
+}
+
+func auditActor(actor []string) string {
+	if len(actor) != 0 && actor[0] != "" {
+		return actor[0]
+	}
+	return "operator"
 }
 
 func (s *Memory) Renewals(_ context.Context) ([]RenewalJob, error) {
